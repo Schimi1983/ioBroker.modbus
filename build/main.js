@@ -1,0 +1,116 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ModbusAdapter = void 0;
+const modbus_1 = __importDefault(require("@iobroker/modbus"));
+const MAX_READS = 20;
+const MAX_DETECT_TIME = 30_000;
+/**
+ * Timeout of one detection read. Most reads hit registers of other device types, which some devices (often
+ * RTU) do not answer at all: with the configured timeout (5 s by default) the time limit would be over after a few.
+ */
+const MAX_DETECT_READ_TIMEOUT = 2_000;
+class ModbusAdapter extends modbus_1.default {
+    constructor(options = {}) {
+        super('modbus', options, {
+            onBeforeReady: async () => {
+                // Backwards compatibility
+                if ((!this.config.params.host && this.config.params.bind) ||
+                    // @ts-expect-error backwards compatibility
+                    (this.config.params.pulseTime === undefined && this.config.params.pulsetime !== undefined)) {
+                    const obj = await this.getForeignObjectAsync(`system.adapter.${this.namespace}`);
+                    if (obj) {
+                        // @ts-expect-error backwards compatibility
+                        obj.native.params.pulseTime ||= this.config.params.pulsetime;
+                        delete obj.native.params.pulsetime;
+                        obj.native.params.host ||= this.config.params.bind;
+                        await this.setForeignObjectAsync(`system.adapter.${this.namespace}`, obj);
+                    }
+                }
+            },
+        });
+    }
+    async processMessage(obj) {
+        if (obj?.command === 'readRegisters') {
+            const result = await this.readRegistersForDetection(obj.message);
+            if (obj.callback) {
+                this.sendTo(obj.from, obj.command, result, obj.callback);
+            }
+            return;
+        }
+        return super.processMessage(obj);
+    }
+    /**
+     * Device detection of the template library: reads a few registers over the connection of the running master.
+     * Only function codes 3 and 4 are used, nothing is written.
+     */
+    async readRegistersForDetection(message) {
+        const { reads, deviceId } = (message || {});
+        if (!Array.isArray(reads) || !reads.length || reads.length > MAX_READS) {
+            return { error: `Expected 1..${MAX_READS} reads` };
+        }
+        for (const r of reads) {
+            if ((r?.registerType !== 'holdingRegs' && r?.registerType !== 'inputRegs') ||
+                !Number.isInteger(r.address) ||
+                r.address < 0 ||
+                r.address > 65535 ||
+                !Number.isInteger(r.len) ||
+                r.len < 1 ||
+                r.len > 125 ||
+                r.address + r.len > 65536) {
+                return { error: `Invalid read request: ${JSON.stringify(r)}` };
+            }
+        }
+        if (this.config.params.slave === '1' || this.config.params.slave === 1) {
+            return { error: 'Device detection works only in master mode' };
+        }
+        // The client is not part of the public API of @iobroker/modbus, so check it carefully
+        const master = this.modbus;
+        const client = master?.modbusClient;
+        if (!client || typeof client.readHoldingRegisters !== 'function' || !master?.connected) {
+            return { error: 'Not connected to the device' };
+        }
+        const unitId = Number.isInteger(deviceId) && deviceId >= 0 && deviceId <= 255
+            ? deviceId
+            : parseInt(this.config.params.deviceId, 10) || 1;
+        const configuredTimeout = parseInt(this.config.params.timeout, 10);
+        const options = {
+            probe: true,
+            timeout: configuredTimeout > 0 ? Math.min(configuredTimeout, MAX_DETECT_READ_TIMEOUT) : MAX_DETECT_READ_TIMEOUT,
+        };
+        const started = Date.now();
+        const results = [];
+        // one after another: the client queues the requests anyway, and a slow device should not get a burst
+        for (const r of reads) {
+            if (Date.now() - started > MAX_DETECT_TIME) {
+                results.push({ error: 'skipped (time limit)' });
+                continue;
+            }
+            try {
+                const response = r.registerType === 'holdingRegs'
+                    ? await client.readHoldingRegisters(unitId, r.address, r.len, options)
+                    : await client.readInputRegisters(unitId, r.address, r.len, options);
+                results.push({ registers: Array.from(response.register || []) });
+            }
+            catch (err) {
+                const e = err;
+                results.push({ error: e?.message || String(err), exceptionCode: e?.exceptionCode });
+            }
+        }
+        this.log.info(`Device detection: ${reads.length} read(s) on unit ${unitId}, ${results.filter(r => r.registers).length} answered`);
+        return { results };
+    }
+}
+exports.ModbusAdapter = ModbusAdapter;
+// If started as allInOne mode => return function to create instance
+if (require.main !== module) {
+    // Export the constructor in compact mode
+    module.exports = (options) => new ModbusAdapter(options);
+}
+else {
+    // otherwise start the instance directly
+    (() => new ModbusAdapter())();
+}
+//# sourceMappingURL=main.js.map

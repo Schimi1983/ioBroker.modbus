@@ -1,7 +1,7 @@
 {
   "common": {
     "name": "modbus",
-    "version": "9.5.0",
+    "version": "9.5.1-test.0",
     "news": {
       "9.5.0": {
         "en": "Settings for retries of reads and writes after a timeout or a lost connection\nUpdated `@iobroker/modbus` to 7.12.0: pending requests are rejected at once when the connection closes; read and write retries\nTemplate library: files marked as optional in the template (e.g. registers of a newer firmware) are not preselected",
@@ -151,7 +151,6 @@
     "dataSource": "poll",
     "tier": 2,
     "eraseOnUpload": true,
-    "nogit": true,
     "adminUI": {
       "config": "materialize"
     },
